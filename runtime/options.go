@@ -14,4 +14,5 @@ type Options struct {
 	ExportFile   string
 	CiConfig     *viper.Viper
 	BuildArgs    []string
+	WebUi        bool
 }

@@ -69,5 +69,6 @@ func doAnalyzeCmd(cmd *cobra.Command, args []string) {
 		ExportFile:   exportFile,
 		CiConfig:     ciConfig,
 		IgnoreErrors: viper.GetBool("ignore-errors") || ignoreErrors,
+		WebUi:        webUi,
 	})
 }

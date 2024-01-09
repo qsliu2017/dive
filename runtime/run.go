@@ -16,6 +16,7 @@ import (
 	"github.com/wagoodman/dive/runtime/export"
 	"github.com/wagoodman/dive/runtime/ui"
 	"github.com/wagoodman/dive/utils"
+	"github.com/wagoodman/dive/web"
 )
 
 func run(enableUi bool, options Options, imageResolver image.Resolver, events eventChannel, filesystem afero.Fs) {
@@ -98,6 +99,15 @@ func run(enableUi bool, options Options, imageResolver image.Resolver, events ev
 				events.exitWithError(fmt.Errorf("file tree has path errors (use '--ignore-errors' to attempt to continue)"))
 				return
 			}
+		}
+
+		if enableUi && options.WebUi {
+			port := 8964
+			events.message(utils.TitleFormat("Starting web server") + fmt.Sprintf(" at http://localhost:%d", port))
+			if err := web.Run(port, options.Image, analysis, treeStack); err != nil {
+				events.exitWithError(err)
+			}
+			return
 		}
 
 		if enableUi {
