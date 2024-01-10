@@ -2,18 +2,18 @@ package web
 
 import (
 	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
 	"github.com/wagoodman/dive/dive/filetree"
 	"github.com/wagoodman/dive/dive/image"
 )
 
+//go:generate bun i
 //go:generate bun run build
 
 //go:embed dist/*
@@ -25,44 +25,36 @@ func Run(port int, imageName string, analysis *image.AnalysisResult, treeStack f
 		return errors.Join(err, errors.New("cannot find dist directory"))
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(dist)))
-	mux.HandleFunc("/api/analysis", func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewEncoder(w).Encode(analysis); err != nil {
-			log.Default().Printf("cannot encode analysis: %v", err)
-		}
+	e := echo.New()
+
+	e.StaticFS("/", dist)
+	e.GET("/api/analysis", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, analysis)
 	})
 
+	layerIdList := make([]string, 0, len(analysis.Layers))
 	layerMap := make(map[string]*layer)
 	for _, l := range analysis.Layers {
+		layerIdList = append(layerIdList, l.Id)
 		layerMap[l.Id] = newLayer(l)
 	}
-	layerList := make([]*layer, 0, len(analysis.Layers))
-	for _, l := range analysis.Layers {
-		layerList = append(layerList, newLayer(l))
-	}
-	// /api/layer?id
-	// /api/layer
-	mux.HandleFunc("/api/layer", func(w http.ResponseWriter, r *http.Request) {
-		id := r.URL.Query().Get("id")
-		if id != "" {
-			layer, has := layerMap[id]
-			if !has {
-				http.Error(w, fmt.Sprintf("layer id not found: %s", id), http.StatusNotFound)
-				return
-			}
-			if err := json.NewEncoder(w).Encode(layer); err != nil {
-				log.Default().Printf("cannot encode layer: %v", err)
-			}
-			return
+
+	e.GET("/api/layer", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, layerIdList)
+	})
+	e.GET("/api/layer/:id", func(c echo.Context) error {
+		id := c.Param("id")
+		layer, has := layerMap[id]
+		if !has {
+			return c.JSON(http.StatusNotFound, fmt.Sprintf("layer id not found: %s", id))
 		}
-		if err := json.NewEncoder(w).Encode(layerList); err != nil {
-			log.Default().Printf("cannot encode layer list: %v", err)
-		}
+		return c.JSON(http.StatusOK, layer)
 	})
 
+	treeIdList := make([]uuid.UUID, 0, len(analysis.RefTrees))
 	treeMap := make(map[uuid.UUID]map[string]*fileNode)
 	for _, tree := range analysis.RefTrees {
+		treeIdList = append(treeIdList, tree.Id)
 		nodeMap := make(map[string]*fileNode)
 		tree.Root.VisitDepthChildFirst(
 			func(fn *filetree.FileNode) error {
@@ -74,37 +66,42 @@ func Run(port int, imageName string, analysis *image.AnalysisResult, treeStack f
 		)
 		treeMap[tree.Id] = nodeMap
 	}
-	// /api/filetree?id
-	// /api/filetree
-	mux.HandleFunc("/api/filetree", func(w http.ResponseWriter, r *http.Request) {
-		id := r.URL.Query().Get("id")
-		if id != "" {
-			tree, has := treeMap[uuid.MustParse(id)]
-			if !has {
-				http.Error(w, fmt.Sprintf("file tree id not found: %s", id), http.StatusNotFound)
-				return
-			}
-			if err := json.NewEncoder(w).Encode(tree); err != nil {
-				log.Default().Printf("cannot encode file tree: %v", err)
-			}
-			return
+	e.GET("/api/tree", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, treeIdList)
+	})
+	e.GET("/api/tree/:tree-id", func(c echo.Context) error {
+		id := c.Param("tree-id")
+		tree, has := treeMap[uuid.MustParse(id)]
+		if !has {
+			return c.JSON(http.StatusNotFound, fmt.Sprintf("file tree id not found: %s", id))
 		}
-		if err := json.NewEncoder(w).Encode(treeMap); err != nil {
-			log.Default().Printf("cannot encode file tree list: %v", err)
+		return c.JSON(http.StatusOK, tree)
+	})
+	e.GET("/api/tree/:tree-id/:path", func(c echo.Context) error {
+		treeId := c.Param("tree-id")
+		path := "/" + c.Param("path")
+		tree, has := treeMap[uuid.MustParse(treeId)]
+		if !has {
+			return c.JSON(http.StatusNotFound, fmt.Sprintf("file tree id not found: %s", treeId))
 		}
+		node, has := tree[path]
+		if !has {
+			return c.JSON(http.StatusNotFound, fmt.Sprintf("file node path not found: %s", path))
+		}
+		return c.JSON(http.StatusOK, node)
 	})
 
-	return http.ListenAndServe(fmt.Sprintf(":%d", port), mux)
+	return e.Start(fmt.Sprintf(":%d", port))
 }
 
 type layer struct {
-	Id      string
-	Index   int
-	Command string
-	Size    uint64
-	TreeId  uuid.UUID
-	Names   []string
-	Digest  string
+	Id      string    `json:"id"`
+	Index   int       `json:"index"`
+	Command string    `json:"command"`
+	Size    uint64    `json:"size"`
+	TreeId  uuid.UUID `json:"treeId"`
+	Names   []string  `json:"names"`
+	Digest  string    `json:"digest"`
 }
 
 func newLayer(l *image.Layer) *layer {
@@ -156,6 +153,8 @@ type fileNode struct {
 	Name     string
 	Children []string
 	Path     string
+	Info     *filetree.FileInfo
+	DiffType string
 }
 
 func newFileNode(fn *filetree.FileNode) *fileNode {
@@ -168,5 +167,7 @@ func newFileNode(fn *filetree.FileNode) *fileNode {
 		Name:     fn.Name,
 		Children: children,
 		Path:     fn.Path(),
+		Info:     &fn.Data.FileInfo,
+		DiffType: fn.Data.DiffType.String(),
 	}
 }
